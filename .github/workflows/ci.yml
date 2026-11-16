@@ -162,4 +162,5 @@ jobs:
             libvulkan-dev mesa-vulkan-drivers libfontconfig-dev libfreetype-dev
       - name: gpui-shell syntax tests
         working-directory: vendor/gpui-kit
-        run: cargo test -p gpui-shell --config 'profile.dev.package."*".opt-level=0' syntax:: -- --nocapture
+        run: |
+          cargo test -p gpui-shell --config 'profile.dev.package."*".opt-level=0' syntax:: -- --nocapture
