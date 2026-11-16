@@ -161,8 +161,6 @@ jobs:
             libxcb1-dev libxkbcommon-dev libxkbcommon-x11-dev libwayland-dev \
             libvulkan-dev mesa-vulkan-drivers libfontconfig-dev libfreetype-dev
       - name: gpui-shell syntax tests
-        working-directory: vendor/gpui-kit
-        # gpui-kit has no lockfile of its own; reuse the root one so versions match the app build.
+        # From the root, so the root lockfile and [patch] (vendored gpui) apply.
         run: |
-          cp ../../Cargo.lock Cargo.lock
-          cargo test -p gpui-shell --config 'profile.dev.package."*".opt-level=0' syntax:: -- --nocapture
+          cargo test --locked -p gpui-shell --config 'profile.dev.package."*".opt-level=0' syntax:: -- --nocapture
