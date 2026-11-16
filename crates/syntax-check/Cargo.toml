@@ -1,0 +1,12 @@
+# Fork only (not for upstream): compiles vendor/gpui-kit/crates/shell/src/syntax.rs inside the
+# root workspace, so its tests run with the root lockfile and [patch] entries.
+[package]
+name = "syntax-check"
+version = "0.0.0"
+edition.workspace = true
+publish = false
+
+[dependencies]
+gpui = { package = "gpui-pre", version = "=0.3.8" }
+gpui-base = { path = "../../vendor/gpui-kit/crates/base" }
+syntect = { version = "5.3.0", default-features = false, features = ["parsing", "default-syntaxes", "regex-fancy"] }

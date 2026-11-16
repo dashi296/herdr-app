@@ -163,4 +163,4 @@ jobs:
       - name: gpui-shell syntax tests
         # From the root, so the root lockfile and [patch] (vendored gpui) apply.
         run: |
-          cargo test --locked -p gpui-shell --config 'profile.dev.package."*".opt-level=0' syntax:: -- --nocapture
+          cargo test -p syntax-check --config 'profile.dev.package."*".opt-level=0' -- --nocapture
