@@ -78,6 +78,9 @@ fn parse_line(
     }
 }
 
+/// One line of the cache. Keeping a clone of the parser state per line costs
+/// memory (about 1.2 KB per line of JS in a quick measurement) in exchange
+/// for restarting the parse at any line.
 struct CachedLine {
     /// Parser and scope state at the start of the line.
     state: (ParseState, ScopeStack),
@@ -97,6 +100,9 @@ struct LineCache {
     /// Lines parsed by the last update.
     #[cfg(test)]
     parsed_rows: usize,
+    /// Full parses since creation, counting the first one.
+    #[cfg(test)]
+    full_parses: usize,
 }
 
 impl LineCache {
@@ -109,6 +115,8 @@ impl LineCache {
             lines: Vec::new(),
             #[cfg(test)]
             parsed_rows: 0,
+            #[cfg(test)]
+            full_parses: 0,
         };
         cache.reparse_all(text);
         cache
@@ -122,6 +130,7 @@ impl LineCache {
         #[cfg(test)]
         {
             self.parsed_rows = 0;
+            self.full_parses += 1;
         }
         let mut parser = ParseState::new(self.syntax);
         let mut scopes = ScopeStack::new();
@@ -173,7 +182,7 @@ impl LineCache {
             && edit.start_byte <= edit.old_end_byte
             && edit.old_end_byte <= self.len
             && edit.start_byte <= edit.new_end_byte
-            && text.len() + edit.old_end_byte == self.len + edit.new_end_byte
+            && text.len().checked_add(edit.old_end_byte) == self.len.checked_add(edit.new_end_byte)
             && self.on_row(start_row, edit.start_byte)
             && self.on_row(old_end_row, edit.old_end_byte)
             && text.is_char_boundary(edit.start_byte)
@@ -194,6 +203,11 @@ impl LineCache {
         let delta = edit.new_end_byte as isize - edit.old_end_byte as isize;
         // Old start of a later row, moved to where it is in the new text.
         let moved = |start: usize| start.checked_add_signed(delta);
+        // A row of the new text, or None if the cache and the text disagree.
+        let row_text = |start: usize, end: usize| {
+            (start <= end && text.is_char_boundary(start) && text.is_char_boundary(end))
+                .then(|| &text[start..end])
+        };
 
         #[cfg(test)]
         {
@@ -215,7 +229,10 @@ impl LineCache {
                     None => text.len(),
                 },
             };
-            fresh.push(self.parse(&text[*start..end], &mut parser, &mut scopes));
+            let Some(line) = row_text(*start, end) else {
+                return self.reparse_all(text);
+            };
+            fresh.push(self.parse(line, &mut parser, &mut scopes));
         }
 
         // Reparse the old rows after the edit until the state matches the cached one.
@@ -237,10 +254,10 @@ impl LineCache {
                 Some(None) => return self.reparse_all(text),
                 None => text.len(),
             };
-            if start > end || end > text.len() || !text.is_char_boundary(start) {
+            let Some(line) = row_text(start, end) else {
                 return self.reparse_all(text);
-            }
-            fresh.push(self.parse(&text[start..end], &mut parser, &mut scopes));
+            };
+            fresh.push(self.parse(line, &mut parser, &mut scopes));
         }
 
         // Splice the reparsed rows in place and shift the starts of the rows after the edit.
@@ -508,7 +525,7 @@ mod tests {
         assert!(find_syntax("unknown-language").is_none());
     }
 
-    /// The previous whole-document `update`, kept verbatim as an independent reference.
+    /// The previous whole-document `update` loop, inlined, as an independent reference.
     fn full_highlights(text: &str, language: &str) -> Vec<(Range<usize>, &'static str)> {
         let mut parser = ParseState::new(find_syntax(language).unwrap());
         let mut scopes = ScopeStack::new();
@@ -655,6 +672,10 @@ mod tests {
                     replace(&mut cache, &mut text, start, old_end, &insert);
                     assert_matches(&cache, &text, language, &format!("{language}: {text:?}"));
                 }
+                assert_eq!(
+                    cache.full_parses, 1,
+                    "{language}: a valid edit fell back to a full parse"
+                );
             }
         }
     }
@@ -734,6 +755,7 @@ mod tests {
             let (start, old_end, insert) = edit(&text);
             replace(&mut cache, &mut text, start, old_end, &insert);
             assert_matches(&cache, &text, "js", name);
+            assert_eq!(cache.full_parses, 1, "{name}: fell back to a full parse");
         }
     }
 
@@ -747,6 +769,24 @@ mod tests {
             replace(&mut cache, &mut text, at, at, "/*");
         }
         assert_matches(&cache, &text, "js", "batched");
+        assert_eq!(cache.full_parses, 1);
+    }
+
+    #[test]
+    fn a_state_change_is_reparsed_until_it_converges() {
+        // Opening a block comment turns the next lines into comment until the `*/` that a line
+        // comment already held; from there on the state equals the cached one again.
+        let mut text = format!(
+            "{}// */\n{}",
+            "let a = 1;\n".repeat(5),
+            "let b = 2;\n".repeat(50)
+        );
+        let mut cache = LineCache::new(find_syntax("js").unwrap(), &text);
+        replace(&mut cache, &mut text, 0, 0, "/*\n");
+        assert_matches(&cache, &text, "js", "comment opened");
+        assert_eq!(cache.full_parses, 1);
+        // The new `/*` row, the five rows it comments out, and the row that closes it.
+        assert_eq!(cache.parsed_rows, 7);
     }
 
     #[test]
@@ -787,7 +827,27 @@ mod tests {
             let changed = format!("é{text}");
             cache.apply(&edit, &changed);
             assert_matches(&cache, &changed, "js", &format!("{edit:?}"));
+            assert_eq!(cache.full_parses, 2, "{edit:?} should fall back");
         }
+    }
+
+    #[test]
+    fn a_text_of_the_same_shape_but_other_content_does_not_panic() {
+        use gpui_base::input::Point;
+        // The cached row boundary (byte 2) falls inside `é` in the new text.
+        let mut cache = LineCache::new(find_syntax("js").unwrap(), "a\nbc");
+        let zero = Point::new(0, 0);
+        let edit = InputEdit {
+            start_byte: 0,
+            old_end_byte: 0,
+            new_end_byte: 0,
+            start_position: zero,
+            old_end_position: zero,
+            new_end_position: zero,
+        };
+        cache.apply(&edit, "aéb");
+        assert_matches(&cache, "aéb", "js", "same shape, other content");
+        assert_eq!(cache.full_parses, 2);
     }
 
     #[test]
